@@ -1,0 +1,103 @@
+---
+title: "Prep firm risk data"
+author: "Gopal Penny"
+date: "4/15/2021"
+output: 
+  html_document:
+    toc: true
+    code_folding: hide
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+```
+
+## Data background
+
+The firm risk data is located [here](https://sites.google.com/view/firmrisk/home?authuser=0)
+
+The dataset was developed by a group of researchers including:
+
+* Tarek A. Hassan, Associate Professor of Economics, Boston University
+* Stephan Hollander, Professor of Financial Accounting, Tilburg University
+* Laurence van Lent, Professor of Accounting and Economics, Frankfurt School of Finance and Management
+* Ahmed Tahoun, Associate Professor of Accounting, London Business School
+* Markus Schwedeler, PhD student in Economics, Boston University
+
+## Data prep
+
+The original dataset had some funny quirks in the csv file, `firmquarter_2020q4.csv`. I re-named this as a text file (`firmquarter_2020q4.txt`), imported the data line-by-line, and then took only the first 22 columns. This resolved a couple of issues where `read.table` was not detecting line endings and some rows which seemed to have 35 columns instead of 36. 
+
+```{r read-and-prep, eval = FALSE}
+library(tidyverse)
+
+# Read all lines of the file
+con <- file("~/Downloads/firmquarter_2020q4.txt")
+all_lines <- readLines(con)
+close(con)
+
+# The maximum number of characters in a line should be around 500. If it's greater, then line endings are not being parsed correctly
+max(nchar(all_lines))
+
+# Split each line into columns and save as individual data.frame
+for (i in 1:length(all_lines)) {
+  if (i == 1) {
+    line_fields <- list(NULL)
+  }
+  line <- all_lines[i]
+  fields <- strsplit(line, "\\t")
+  line_fields[[i]] <- as.data.frame(t(fields[[1]]))
+}
+
+# Select the first 22 columns of each line
+line_fields_select <- lapply(line_fields, function(x) x[1, 1:22])
+
+# Combine all lines into a single data.frame
+fq_prep <- do.call(rbind, line_fields_select[2:length(line_fields_select)]) #%>%
+
+# Format the data.frame with column headers and convert numeric and date variables from character
+fq <- fq_prep %>% as_tibble() %>%
+  mutate(across(c(3:16), as.numeric),
+         across(22, function(x) as.Date(x, "%d-%b-%Y"))) %>%
+  set_names(line_fields_select[[1]])
+
+# Save the data as an RDS file
+saveRDS(fq, "data/format/firmquarter_2020q4.rds")
+```
+
+
+```{r echo = FALSE}
+fq <- readRDS("data/format/firmquarter_2020q4.rds")
+```
+
+The output data file `firmquarter_2020q4.rds` contains `r format(nrow(fq),big.mark = ",")` rows of data corresponding to `r format(length(unique(fq$company_name)),big.mark = ",")` companies.
+
+
+## Plot data for a sample of firms
+
+Sample 20 firms and plot the main data for risk and sentiment scores.
+
+```{r fig.width = 10, fig.height = 13}
+set.seed(100)
+company_names_all <- unique(fq$company_name)
+companies <- sample(company_names_all, 20)
+fq_sample <- fq %>% filter(company_name %in% companies)
+
+# Generate random colors
+color <- grDevices::colors()[grep('gr(a|e)y', grDevices::colors(), invert = T)]
+n <- 50
+set.seed(50)
+rand_colors <- sample(color, n)
+
+# Prepare dates and 
+fq_sample %>% pivot_longer(PRisk:PRiskT_technology) %>%
+  # filter(name %in% c("Risk","Sentiment")) %>%
+  ggplot(aes(date_earningscall, value, color = company_name)) + 
+  geom_point(aes(shape = company_name)) + geom_line(alpha = 0.6) +
+  scale_color_manual(values = rand_colors) + 
+  scale_shape_manual(values = rep(1:6,10)) +
+  facet_wrap(~name, scales = "free_y", ncol = 2) +
+  ggp::t_manu()
+```
+
