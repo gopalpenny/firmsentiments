@@ -1,0 +1,174 @@
+---
+title: "Firm sentiments proposal"
+author: "Gopal Penny"
+date: "4/18/2021"
+output: 
+  html_document:
+    toc: yes
+    code_folding: hide
+---
+
+```{r setup, include=FALSE, message = FALSE, warning = FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+```
+
+
+# Project proposal
+
+## Abstract
+
+How are companies feeling?
+
+The perceptions of risk and upside within publicly traded companies are often shrouded in mystery. Quarterly earnings conference calls represent an important exception, offering an opportunity to understand corporate sentiment with respect to quarterly earnings statements and future projections. In this project, I merge datasets of firm sentiment from quarterly earnings calls with daily stock market valuations to develop a forecast model that predicts firm sentiment *between* the quarterly calls. This project will offer a valuable tool to investors who want to have a continuous benchmark for firm sentiment and risk throughout the year, and offers a valuable tool for identifying unexpected risks that may arise. This particular problem represents a common situation where proxy data are more readily available than sparse observations of the desired outcome variable. This project will therefore demonstrate to potential employers my ability to conduct analyses that will be relevant to a variety of practical problems they may be facing.
+
+## Datasets
+
+The two datasets I will analyze include:
+
+I. Firm sentiment and risk (60 MB), prepared by researchers at Boston University (https://sites.google.com/view/firmrisk/home?authuser=0), based on transcripts of quarterly shareholder calls to gauge the perceived risk and sentiment of publicly traded firms. The dataset contains records of 324,345 quarterly conference calls from 12,802 companies from the years 2001-2020, with indices for *firm sentiment* (positive or negative outlook) and *firm risk* (uncertainty in outlook), and further asseses both metrics within political and non-political subcategories.
+II. Stock market history (1.1 GB), accessed from the Yahoo! finance API (i.e., the yfinance package in python). This data contains daily stock market valuations and dividends for all companies and all years in the firm sentiment and risk dataset.
+
+## Analyses
+
+I will conduct multiple analyses to better understand and predict firm sentiment. My plan for the project will be based on the following outline of tasks:
+
+1. I will develop a baseline prediction using coefficients from linear regression on to predict *firm sentiment* from quarterly stock growth and *firm risk* from variability (i.e., variance) in stock growth.
+2. I will then use multiple analyses to better understand the nature of firm sentiment and risk. For instance:
+    a. Look for autocorrelation in the dataset, and identify timescales of strongest correlation with stock market indicators (e.g., 10-day vs 50-day stock growth variance)
+    b. Determine extent to which firm sentiment and firm risk contain useful signal versus noise. To do this I will regress sentiment and risk using predictors before and *after* the call to see how much regression errors can be reduced.
+    c. Identify the earnings calls that were most poorly predicted by market indicators, and investigate causes
+    d. Consider the effects of categorization (e.g., industry grouping) and whether information from (or grouping of) similar firms improves predictions.
+    e. Time permitting, incorporate additional datasets (e.g., Twitter, news articles, or corporate violation tracker), focusing on reducing errors identified in (2c).
+3. Develop three additional predictive models
+    a. Ordinary-least-squares regression model using additional predictors identified in (2)
+    b. Machine learning (e.g., SVM)
+    c. Artificial neural networks (e.g., deep learning)
+4. Deploy a web application (e.g., using R shiny) that allows users to view forecasts of firm sentiment (with uncertainty) for any publicly traded company with a record in the firm sentiment and risk database.
+    
+## Metrics of success
+
+I will manage the project in a public repository on github.com. The success of the project will be determined by (i) completion of tasks 1-3, (ii) the extent to which the additional models (task 3) reduce uncertainty relative to the benchmark model (task 1), and (iii) the communication and deployment of project deliverables through a web application.
+
+# Initial relationships between stocks and firm sentiments
+
+To start the project with Task 1 and get a better sense of the relationships within the data, I calculated average quarterly growth (given as growth / day) for each company.
+
+## Average quarterly growth
+
+```{r}
+library(data.table)
+library(tidyverse)
+
+if (file.exists("data/format/yfinance_stock_quarterly_growth.csv")) {
+  stocks_quarterly_growth <- read_csv("data/format/yfinance_stock_quarterly_growth.csv")
+} else {
+  stocks <- read_csv("data/format/yfinance_stock_histories.csv") %>%
+    select(Close, date, ticker) 
+  
+  stocks_quarterly_growth <- stocks %>%
+    group_by(ticker) %>%
+    mutate(growth = Close - lag(Close),
+           year = as.numeric(strftime(date, "%Y")),
+           quarter = (as.numeric(strftime(date, "%m")) + 2)%/%3) %>%
+    group_by(ticker, year, quarter) %>%
+    summarize(avg_growth = mean(growth, na.rm = TRUE))
+  
+  rm(stocks)
+  
+  write_csv(stocks_quarterly_growth, "data/format/yfinance_stock_quarterly_growth.csv")
+}
+
+```
+
+I then joined the data with firm sentiments and ran initial regressions. The following regression predicts firm sentiments (S) based on average growth (G) for the preceding quarter as:
+
+$$
+S_{i,j} = c_0 + c_1 G_{i,j} + \epsilon_{i,j}
+$$
+Where $i$ and $j$ represent the firm and year-quarter combination, respectively, and the $\epsilon_{i,j} represents the regression error. This regression yields the following summary:
+
+```{r}
+firmrisk <- readRDS("data/format/firmquarter_2020q4.rds") %>%
+  separate(date, c("year", "quarter"), sep = "q") %>%
+  mutate(across(c("year","quarter"), as.numeric))
+
+# Identify outliers in average quarterly growth
+stocks_quarterly_growth_IQR <- quantile(stocks_quarterly_growth$avg_growth, c(0.25, 0.75), na.rm = TRUE)
+stocks_quarterly_growth_IQR_outliers <- stocks_quarterly_growth_IQR + 
+  (stocks_quarterly_growth_IQR[2] - stocks_quarterly_growth_IQR[1]) * c(-1.5, 1.5)
+stocks_quarterly_growth <- stocks_quarterly_growth %>%
+  mutate(outlier = !between(avg_growth, stocks_quarterly_growth_IQR_outliers[1], stocks_quarterly_growth_IQR_outliers[2]))
+
+
+firms_df <- firmrisk %>% inner_join(stocks_quarterly_growth, by = c("ticker", "year", "quarter")) %>% 
+  drop_na() %>% filter(!outlier)
+
+lm_quarterly_all <- summary(lm(Sentiment ~ avg_growth, firms_df))
+lm_quarterly_all
+```
+
+Although the there is little correlation between the two variables (demonstrated by a low R^2^ = 0.0062), there is a clear statistical relationship relationship between the variables given that the slope has a p-value < 10^-16^.
+
+## Binned average quarterly growth
+
+In order to better visualize this relationship, I grouped the average quarterly growth into 10 equal-sized bins, and did the same for Sentiment scores. 
+
+```{r}
+# Group the average quarterly growth into 10 equal-sized bins, and do the same for Sentiment scores.
+firms_df_binned <- firms_df %>%
+  mutate(avg_growth_bins = cut(avg_growth, quantile(avg_growth, seq(0, 1, by = 0.1), na.rm = TRUE), include.lowest = TRUE),
+         sentiment_bins = cut(Sentiment, quantile(Sentiment, seq(0, 1, by = 0.1), na.rm = TRUE), include.lowest = TRUE))
+
+# Get the lower limit of each bin
+avg_growth_bins_ll <- as.numeric(gsub("(\\()|(\\[)|(,.*)", "", levels(firms_df_binned$avg_growth_bins)))
+sentiment_bins_ll <- as.numeric(gsub("(\\()|(\\[)|(,.*)", "", levels(firms_df_binned$sentiment_bins)))#)
+```
+
+From the binned growth data set, I then predicted mean sentiment using mean quarterly growth, both averaged within quarterly growth bin. The OLS regression produces a much higher R^2^ of 0.71.
+
+```{r}
+firms_df_binned_growth_means <- firms_df_binned %>% 
+  group_by(avg_growth_bins) %>%
+  summarize(mean_growth = mean(avg_growth),
+            mean_sentiment = mean(Sentiment))
+
+lm_growth_binned <- summary(lm(mean_sentiment ~ mean_growth, firms_df_binned_growth_means))
+lm_growth_binned
+```
+
+From the binned sentiment data set, predict mean sentiment using mean quarterly growth, both averaged within sentinment bins. The OLS regression produces an even higher R^2^ of 0.99.
+
+```{r}
+firms_df_binned_sentiment_means <- firms_df_binned %>% 
+  group_by(sentiment_bins) %>%
+  summarize(mean_growth = mean(avg_growth,na.rm = TRUE),
+            mean_sentiment = mean(Sentiment))
+
+lm_sentiment_binned <- summary(lm(mean_sentiment ~ mean_growth, firms_df_binned_sentiment_means))
+lm_sentiment_binned
+```
+
+## Average quarterly growth versus Sentiment
+
+
+The following plot shows average average quarterly growth versus average sentiment for all year-quarter combinations as well as for both sets of binned data.
+
+```{r}
+lm_coefficients <- rbind(with(lm_quarterly_all, c(coefficients[,1], coefficients[2,4], r.squared)),
+                         with(lm_growth_binned, c(coefficients[,1], coefficients[2,4], r.squared)),
+                         with(lm_sentiment_binned, c(coefficients[,1], coefficients[2,4], r.squared))) %>%
+  as_tibble() %>% set_names(c("intercept", "slope", "p_val_slope", "regression_r_squared"))
+
+ggplot() + 
+  geom_point(data = firms_df, aes(avg_growth, Sentiment), alpha = 0.01) +
+  geom_vline(data = data.frame(intercept = avg_growth_bins_ll[-1]), 
+              aes(xintercept = intercept,color = "Growth bins"), alpha = 0.75, linetype = "dashed") +
+  geom_abline(data = data.frame(intercept = sentiment_bins_ll[-1], slope = 0), 
+              aes(slope = slope, intercept = intercept,color = "Sentiment bins"), alpha = 0.75, linetype = "dashed") +
+  geom_point(data = firms_df_binned_sentiment_means, aes(mean_growth, mean_sentiment, color = "Sentiment bins")) +
+  geom_point(data = firms_df_binned_growth_means, aes(mean_growth, mean_sentiment, color = "Growth bins")) +
+  xlab("Average quarterly growth, [%/day]") +
+  coord_flip()
+```
+
+The relationship between the two can only be seen at the aggregate level. This represents an initial step towards predicting firm sentiment with more granularity.

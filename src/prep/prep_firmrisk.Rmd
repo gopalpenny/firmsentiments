@@ -64,14 +64,28 @@ fq <- fq_prep %>% as_tibble() %>%
 
 # Save the data as an RDS file
 saveRDS(fq, "data/format/firmquarter_2020q4.rds")
+
+
+# Save the data as csv file
+write_csv(fq, "data/format/firmquarter_2020q4.csv")
 ```
 
+Ensure csv save is identical to original file:
 
 ```{r echo = FALSE}
-fq <- readRDS("data/format/firmquarter_2020q4.rds")
+fq_rds <- readRDS("data/format/firmquarter_2020q4.rds")
+
+fq_csv <- read_csv("data/format/firmquarter_2020q4.csv") %>%
+  mutate(ticker = replace(ticker, is.na(ticker),""))
+identical(dim(fq_rds), dim(fq_csv)) # they are the same :)
 ```
 
-The output data file `firmquarter_2020q4.rds` contains `r format(nrow(fq),big.mark = ",")` rows of data corresponding to `r format(length(unique(fq$company_name)),big.mark = ",")` companies.
+```{r}
+fq_num_rows <- nrow(fq)
+fq_num_companies <- length(unique(fq$company_name))
+```
+
+The output data file `firmquarter_2020q4.rds` contains `r format(fq_num_rows,big.mark = ",")` rows of data corresponding to `r format(fq_num_companies,big.mark = ",")` companies.
 
 
 ## Plot data for a sample of firms

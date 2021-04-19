@@ -1,0 +1,153 @@
+---
+title: "Firm sentiments ±14 days"
+author: "Gopal Penny"
+date: "4/18/2021"
+output: 
+  html_document:
+    toc: yes
+    code_folding: hide
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+```
+
+# Consider stock returns within 14 days of quarterly reports
+
+Building on the initial analysis considering [quarterly growth](https://gopalpenny.github.io/firmsentiments/firm-sentiments-proposal.h), I now perform a similar analysis using growth with a time period that spans ±14 days of the quarterly earnings report. To begin, I identify all market records within this time window of each earnings report.
+
+```{r message = FALSE}
+library(data.table)
+library(tidyverse)
+
+if (file.exists("data/format/stocks_28day_avg_growth.csv")) {
+  stocks_28day_growth <- read_csv("data/format/stocks_28day_avg_growth.csv")
+} else {
+  # Read firmrisk to data.table
+  firmrisk <- fread("data/format/firmquarter_2020q4.csv")
+  firmrisk <- firmrisk[, .(year_quarter = date, ticker, Risk, Sentiment, date_earningscall)]
+  firmrisk <- firmrisk[, RollDate := date_earningscall - 45] # Shift join data by 45 days for rolling join
+  
+  # Read stock histories to data.table
+  stocks <- fread("data/format/yfinance_stock_histories.csv")
+  stocks <- stocks[order(ticker, date), .(Close, date, ticker)]
+  stocks <- stocks[, `:=`(RollDate = date, CloseLag = shift(Close)), by = ticker] # to calculate daily growth
+  stocks <- stocks[, `:=`(CloseGrowth = (Close - CloseLag)/CloseLag)]
+  
+  # dt_test <- setDT(data.frame(num = 1:7, group = c("a","a","b","b","b","c","c")))
+  
+  # Set join keys
+  setkey(stocks, ticker, RollDate)
+  setkey(firmrisk, ticker, RollDate)
+  
+  # Join stocks and firmrisk data, using rolling date match
+  stocks_growth_rolljoin <- firmrisk[stocks, roll = TRUE, nomatch = 0]
+  
+  # Filter stock growth data to be within 14 days of earnings call
+  stocks_growth_28day_all <- stocks_growth_rolljoin[abs(date_earningscall - date) <= 14]
+  
+  # Get 28-day average stock growth, centered on the date of the earnings call
+  stocks_28day_growth <- as_tibble(stocks_growth_28day[, .(avg_growth = mean(CloseGrowth, na.rm = TRUE), 
+                                                           sd_growth = sd(CloseGrowth, na.rm = TRUE), 
+                                                           Risk = first(Risk), Sentiment = first(Sentiment)),
+                                                       by = .(ticker, year_quarter, date_earningscall)])
+  
+  rm(list = c("stocks", "stocks_growth_rolljoin", "stocks_growth_28day_all"))
+  
+  write_csv(stocks_28day_growth, "data/format/stocks_28day_avg_growth.csv")
+}
+
+
+```
+
+## Average 28-day growth
+
+I then remove any outliers, determined as the interquartile range (IQR) ±1.5 times the IQR. These outliers may be important and I will consider them in greater detail later -- for now, looking at the aggregate statistics, it is fine to ignore. I then run the same regression as presented in the proposal:
+
+$$
+S_{i,j} = c_0 + c_1 G_{i,j} + \epsilon_{i,j}
+$$
+Where $i$ and $j$ represent the firm and year-quarter combination, respectively, and the $\epsilon_{i,j} represents the regression error. The difference from before is that $G$ represents average growth in the 28-day period centered around the proposal. This regression yields the following summary:
+
+```{r}
+# Identify outliers in average 28day growth
+stocks_28day_growth_IQR <- quantile(stocks_28day_growth$avg_growth, c(0.25, 0.75), na.rm = TRUE)
+stocks_28day_growth_IQR_outliers <- stocks_28day_growth_IQR + 
+  (stocks_28day_growth_IQR[2] - stocks_28day_growth_IQR[1]) * c(-1.5, 1.5)
+stocks_28day_growth <- stocks_28day_growth %>%
+  mutate(outlier = !between(avg_growth, stocks_28day_growth_IQR_outliers[1], stocks_28day_growth_IQR_outliers[2]))
+
+
+firms_df <- stocks_28day_growth %>% filter(!outlier)
+
+lm_28day_all <- summary(lm(Sentiment ~ avg_growth, firms_df))
+lm_28day_all
+```
+
+There is a small increase in R^2^ from 0.006 to 0.007. 
+
+```{r}
+# Group the average 28day growth into 10 equal-sized bins, and do the same for Sentiment scores.
+firms_df_binned <- firms_df %>%
+  mutate(avg_growth_bins = cut(avg_growth, quantile(avg_growth, seq(0, 1, by = 0.1), na.rm = TRUE), include.lowest = TRUE),
+         sentiment_bins = cut(Sentiment, quantile(Sentiment, seq(0, 1, by = 0.1), na.rm = TRUE), include.lowest = TRUE))
+
+# Get the lower limit of each bin
+avg_growth_bins_ll <- as.numeric(gsub("(\\()|(\\[)|(,.*)", "", levels(firms_df_binned$avg_growth_bins)))
+sentiment_bins_ll <- as.numeric(gsub("(\\()|(\\[)|(,.*)", "", levels(firms_df_binned$sentiment_bins)))#)
+```
+
+From the binned growth data set, predict mean sentiment using mean 28day growth, both averaged within 28-day growth bin. The OLS regression produces a moderate R^2^. Again there is a clear statistical relationship relationship between the variables given that the slope has a p-value < 10^-16^.
+
+
+## Binned average quarterly growth
+
+Just as before, I grouped the average growth into 10 equal-sized bins, and did the same for Sentiment scores. 
+
+```{r}
+firms_df_binned_growth_means <- firms_df_binned %>% 
+  group_by(avg_growth_bins) %>%
+  summarize(mean_growth = mean(avg_growth, na.rm = TRUE),
+            mean_sentiment = mean(Sentiment, na.rm = TRUE))
+
+lm_growth_binned <- summary(lm(mean_sentiment ~ mean_growth, firms_df_binned_growth_means))
+lm_growth_binned
+```
+
+From the binned growth data set, I then predicted mean sentiment using mean quarterly growth, both averaged within quarterly growth bin. The OLS regression produces a much higher R^2^ of 0.86.
+
+```{r}
+firms_df_binned_sentiment_means <- firms_df_binned %>% 
+  group_by(sentiment_bins) %>%
+  summarize(mean_growth = mean(avg_growth,na.rm = TRUE),
+            mean_sentiment = mean(Sentiment,na.rm = TRUE))
+
+lm_sentiment_binned <- summary(lm(mean_sentiment ~ mean_growth, firms_df_binned_sentiment_means))
+lm_sentiment_binned
+```
+
+From the binned sentiment data set, predict mean sentiment using mean quarterly growth, both averaged within sentinment bins. The OLS regression produces an high R^2^ of 0.98.
+
+## Average quarterly growth versus Sentiment
+
+
+The following plot shows average average 28-day growth versus average sentiment for all year-quarter combinations as well as for both summaries of binned data.
+
+```{r}
+lm_coefficients <- rbind(with(lm_28day_all, c(coefficients[,1], coefficients[2,4], r.squared)),
+                         with(lm_growth_binned, c(coefficients[,1], coefficients[2,4], r.squared)),
+                         with(lm_sentiment_binned, c(coefficients[,1], coefficients[2,4], r.squared))) %>%
+  as_tibble() %>% set_names(c("intercept", "slope", "p_val_slope", "regression_r_squared"))
+
+ggplot() + 
+  geom_point(data = firms_df, aes(avg_growth, Sentiment), alpha = 0.01) +
+  geom_vline(data = data.frame(intercept = avg_growth_bins_ll[-1]), 
+              aes(xintercept = intercept,color = "Growth bins"), alpha = 0.75, linetype = "dashed") +
+  geom_abline(data = data.frame(intercept = sentiment_bins_ll[-1], slope = 0), 
+              aes(slope = slope, intercept = intercept,color = "Sentiment bins"), alpha = 0.75, linetype = "dashed") +
+  geom_point(data = firms_df_binned_sentiment_means, aes(mean_growth, mean_sentiment, color = "Sentiment bins")) +
+  geom_point(data = firms_df_binned_growth_means, aes(mean_growth, mean_sentiment, color = "Growth bins")) +
+  xlab("Average 28-day growth, [%/day]") +
+  coord_flip()
+```
+
